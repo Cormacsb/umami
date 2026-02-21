@@ -60,52 +60,65 @@ function decodeHeader(s: string | undefined | null): string | undefined | null {
   return Buffer.from(s, 'latin1').toString('utf-8');
 }
 
-export async function getLocation(ip: string = '', headers: Headers, hasPayloadIP: boolean) {
-  // Ignore local ips
-  if (!ip || (await isLocalhost(ip))) {
-    return null;
-  }
+export async function getLocation(ip: string = '', headers: Headers, hasPayloadIP: boolean) {                                                                                                                                                                                                              // Ignore local ips
+    if (!ip || (await isLocalhost(ip))) {                                                                                                                                                                                                                                                                
+      return null;
+    }
 
-  if (!hasPayloadIP && !process.env.SKIP_LOCATION_HEADERS) {
-    for (const provider of PROVIDER_HEADERS) {
-      const countryHeader = headers.get(provider.countryHeader);
-      if (countryHeader) {
-        const country = decodeHeader(countryHeader);
-        const region = decodeHeader(headers.get(provider.regionHeader));
-        const city = decodeHeader(headers.get(provider.cityHeader));
+    // Read geo data from proxy headers (forwarded from the original Vercel edge)
+    const proxyCountry = headers.get('x-proxy-geo-country');
+    if (proxyCountry) {
+      const country = decodeHeader(proxyCountry);
+      const region = decodeHeader(headers.get('x-proxy-geo-region'));
+      const city = decodeHeader(headers.get('x-proxy-geo-city'));
 
-        return {
-          country,
-          region: getRegionCode(country, region),
-          city,
-        };
+      return {
+        country,
+        region: getRegionCode(country, region),
+        city,
+      };
+    }
+
+    if (!hasPayloadIP && !process.env.SKIP_LOCATION_HEADERS) {
+      for (const provider of PROVIDER_HEADERS) {
+        const countryHeader = headers.get(provider.countryHeader);
+        if (countryHeader) {
+          const country = decodeHeader(countryHeader);
+          const region = decodeHeader(headers.get(provider.regionHeader));
+          const city = decodeHeader(headers.get(provider.cityHeader));
+
+          return {
+            country,
+            region: getRegionCode(country, region),
+            city,
+          };
+        }
       }
     }
+
+    // Database lookup
+    if (!globalThis[MAXMIND]) {
+      const dir = path.join(process.cwd(), 'geo');
+
+      globalThis[MAXMIND] = await maxmind.open(
+        process.env.GEOLITE_DB_PATH || path.resolve(dir, 'GeoLite2-City.mmdb'),
+      );
+    }
+
+    const result = globalThis[MAXMIND]?.get(stripPort(ip));
+
+    if (result) {
+      const country = result.country?.iso_code ?? result?.registered_country?.iso_code;
+      const region = result.subdivisions?.[0]?.iso_code;
+      const city = result.city?.names?.en;
+
+      return {
+        country,
+        region: getRegionCode(country, region),
+        city,
+      };
+    }
   }
-
-  // Database lookup
-  if (!globalThis[MAXMIND]) {
-    const dir = path.join(process.cwd(), 'geo');
-
-    globalThis[MAXMIND] = await maxmind.open(
-      process.env.GEOLITE_DB_PATH || path.resolve(dir, 'GeoLite2-City.mmdb'),
-    );
-  }
-
-  const result = globalThis[MAXMIND]?.get(stripPort(ip));
-
-  if (result) {
-    const country = result.country?.iso_code ?? result?.registered_country?.iso_code;
-    const region = result.subdivisions?.[0]?.iso_code;
-    const city = result.city?.names?.en;
-
-    return {
-      country,
-      region: getRegionCode(country, region),
-      city,
-    };
-  }
-}
 
 export async function getClientInfo(request: Request, payload: Record<string, any>) {
   const userAgent = payload?.userAgent || request.headers.get('user-agent');
